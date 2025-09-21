@@ -8,6 +8,17 @@ Your devices → Pi-hole (blocks ads) → Cloudflared (encrypts DNS) → Cloudfl
 
 Instead of your DNS queries going out in plain text where anyone can see them, they get encrypted and sent over HTTPS. Plus you get network-wide ad blocking without installing anything on individual devices.
 
+### Security Architecture
+
+This setup uses Docker bridge networking instead of host mode for better security isolation:
+
+- **Network isolation**: Containers run in their own network namespace, isolated from the host system
+- **Controlled access**: Only specific ports (53, 8081) are exposed to your network via explicit IP binding
+- **Attack surface reduction**: Services aren't directly accessible on all host interfaces
+- **Process isolation**: Container processes can't directly access host network interfaces or services
+
+Many other Pi-hole setups use host networking (`network_mode: host`) which exposes all container services directly on the host's network interfaces, creating unnecessary security risks.
+
 ## What you need
 
 - A Raspberry Pi or any Linux machine with Docker
