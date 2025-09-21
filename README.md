@@ -25,6 +25,32 @@ Many other Pi-hole setups use host networking (`network_mode: host`) which expos
 - A static IP address for your Pi
 - About 10 minutes
 
+### User Permissions
+
+This setup requires specific permissions to run properly:
+
+**Initial setup (requires sudo/root):**
+- Installing Docker and Docker Compose
+- Adding your user to the docker group
+
+**Running the containers:**
+- Can be run by any user in the docker group (no sudo needed)
+- Docker handles the privileged port 53 binding automatically
+
+**For network testing:**
+- The test script requires sudo for traffic monitoring: `sudo ./test-doh.sh`
+
+**Setup for non-root users:**
+```bash
+# Add your user to the docker group (one-time setup)
+sudo usermod -aG docker $USER
+
+# Log out and back in, then verify Docker access
+docker ps
+```
+
+**File permissions note:** The setup creates config directories owned by your user. If you encounter permission issues, you may need to adjust ownership: `sudo chown -R 1000:1000 ./config/pihole`
+
 ## Setup
 
 1. **Get the files**
