@@ -93,6 +93,31 @@ To get network-wide ad blocking:
 
 Now every device on your network gets ad blocking automatically.
 
+## Test your setup
+
+A test script is included to verify everything is working correctly:
+
+```bash
+# Make the script executable
+chmod +x test-doh.sh
+
+# Run basic tests
+./test-doh.sh
+
+# Run with network traffic verification (recommended)
+sudo ./test-doh.sh
+```
+
+The script checks:
+- Container health and status
+- DNS resolution through Pi-hole
+- Ad blocking functionality
+- DoH configuration and traffic encryption
+- Proper upstream communication
+- DNS leak detection
+
+Running with sudo allows the script to monitor network traffic and confirm that DNS queries are actually being encrypted via HTTPS instead of sent as plain text.
+
 ## Troubleshooting
 
 **Containers won't start**
