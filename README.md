@@ -18,8 +18,8 @@ Instead of your DNS queries going out in plain text where anyone can see them, t
 
 1. **Get the files**
    ```bash
-   git clone <this-repo>
-   cd pihole-cloudflared
+   git clone https://github.com/josh-valenti/Pihole-Cloudflared-DoH-Docker-Compose.git
+   cd Pihole-Cloudflared-DoH-Docker-Compose
    ```
 
 2. **Fix the IP address**
