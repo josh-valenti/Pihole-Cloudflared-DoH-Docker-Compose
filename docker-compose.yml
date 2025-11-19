@@ -21,9 +21,11 @@ services:
       - cloudflared
     restart: unless-stopped
     ports:
+      #Change the IP addresses in this section to the IP of your Pi or server
       - "192.168.0.29:53:53/tcp"
       - "192.168.0.29:53:53/udp"
       - "192.168.0.29:8081:80/tcp"
+      #Port 8081 is the admin port of the PiHole, in this example you would access the admin console at http://192.168.0.29:8081/admin/login
     environment:
       TZ: "America/Detroit"
       WEB_PORT: "80"
