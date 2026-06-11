@@ -69,6 +69,8 @@ docker ps
      - "YOUR_PI_IP:8081:80/tcp"
    ```
 
+   The compose file also creates an internal Docker network on `172.28.0.0/24` for Pi-hole and Cloudflared to talk to each other. If that range conflicts with your LAN or VPN, change the subnet under `networks:` at the bottom of `docker-compose.yml`, and update the upstream IP `172.28.0.2` in two places: `FTLCONF_dns_upstreams` in `docker-compose.yml` and `CLOUDFLARED_IP` in `test-doh.sh`.
+
 3. **Create folders**
    ```bash
    mkdir -p ./config/pihole ./config/dnsmasq.d
@@ -111,13 +113,15 @@ nslookup doubleclick.net YOUR_PI_IP
 ### Make sure DoH is working
 ```bash
 # Watch for HTTPS traffic to Cloudflare (encrypted DNS)
-sudo tcpdump -i any host 1.1.1.1 and port 443
+sudo tcpdump -i any '(host 1.1.1.1 or host 1.0.0.1) and port 443'
 
 # Then in another terminal, make a DNS query
 nslookup facebook.com YOUR_PI_IP
 ```
 
 You should see encrypted traffic on port 443. If you see traffic on port 53 instead, something's wrong.
+
+Cloudflared alternates between 1.1.1.1 and 1.0.0.1, so traffic to either address is normal.
 
 ## Router setup
 
