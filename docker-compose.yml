@@ -1,37 +1,84 @@
-# Pi-hole + cloudflared (DoH)
+# =====================================================================
+# Pi-hole + dnscrypt-proxy (DNS-over-HTTPS)
 #
-# Both containers get static IPs on their own bridge network, and pihole's
-# upstream points at the cloudflared IP instead of the container name.
-# dnsmasq only resolves upstream hostnames once at startup. On boot
-# Docker's internal DNS isn't always ready yet - This caused DoH to
-# die after a reboot until the stack was bounced. Hardcoding the IP
+# Clients -> Pi-hole (ad blocking, :53) -> dnscrypt-proxy (:5053)
+#         -> Cloudflare DoH (1.1.1.1 / 1.0.0.1 over HTTPS :443)
+#
+# cloudflared used to fill the DoH proxy role, but Cloudflare removed
+# its proxy-dns mode in cloudflared 2026.2.0, so :latest no longer
+# works. dnscrypt-proxy is a maintained drop-in: same static IP, same
+# port, same Cloudflare upstreams.
+#
+# Both containers get static IPs on their own bridge network, and
+# Pi-hole's upstream points at the proxy's IP instead of its container
+# name. dnsmasq only resolves upstream hostnames once at startup, and on
+# boot Docker's internal DNS isn't always ready yet, which used to kill
+# DoH after a reboot until the stack was bounced. Hardcoding the IP
 # sidesteps the whole problem.
+#
+# Images are pinned by tag AND digest so a pull always gets the exact
+# image that was tested. To upgrade, change both the tag and the digest
+# (docker pull <image>:<tag> prints the digest).
+# =====================================================================
 
 services:
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared-doh
+  # ------------------------------------------------------------------
+  # Service: dnscrypt-proxy (DoH forwarder)
+  # Distroless, non-root image. Config comes from ./dnscrypt-proxy and
+  # is mounted read-only; the container filesystem is read-only too.
+  # ------------------------------------------------------------------
+  dnscrypt-proxy:
+    image: klutchell/dnscrypt-proxy:2.1.18@sha256:a98e8d13314fa8b75620026441b1d6581e2b55189509a794500c5c86064df810
+    container_name: dnscrypt-proxy
     restart: unless-stopped
-    command: proxy-dns --address 0.0.0.0 --port 5053
     networks:
       dns_net:
-        ipv4_address: 172.28.0.2   # pihole's upstream points here
+        ipv4_address: 172.28.0.2   # Pi-hole's upstream points here
+    volumes:
+      - ./dnscrypt-proxy/dnscrypt-proxy.toml:/config/dnscrypt-proxy.toml:ro
+
+    # --- Hardening ---
+    # Listens on 5053 (unprivileged), so it needs no Linux capabilities
+    read_only: true
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
-    read_only: true
     tmpfs:
       - /tmp
-      - /var/tmp
-    # No healthcheck - the image is distroless (no shell/dig) so there's
-    # nothing to run. Doesn't matter, FTL just retries the IP until it's up.
 
+    # --- Healthcheck ---
+    # dnsprobe ships in the image for exactly this. It resolves a name
+    # through the local listener, which only succeeds once a DoH round
+    # trip to Cloudflare works. start_period covers the netprobe wait
+    # in dnscrypt-proxy.toml on a slow boot.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dnsprobe", "cloudflare.com", "127.0.0.1:5053"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+
+  # ------------------------------------------------------------------
+  # Service: Pi-hole (ad blocking + LAN-facing DNS)
+  # Uses the image's built-in healthcheck (dig against its own FTL).
+  # ------------------------------------------------------------------
   pihole:
-    image: pihole/pihole:latest
+    image: pihole/pihole:2026.09.0@sha256:5b9c8cf51de7d6d3f2240dbe72baf5f06e1fd39cb4d77a99fab4fa13e23bd1be
     container_name: pihole
     restart: unless-stopped
+
+    # --- Startup ordering ---
+    # Wait until the DoH proxy is actually answering before starting
+    # Pi-hole, so the first client queries after a reboot don't fail.
     depends_on:
-      - cloudflared
+      dnscrypt-proxy:
+        condition: service_healthy
+
+    # --- Networking ---
+    # Bind only to the Pi's LAN IP (change 192.168.0.29 to yours)
     networks:
       dns_net:
         ipv4_address: 172.28.0.3
@@ -39,21 +86,30 @@ services:
       - "192.168.0.29:53:53/tcp"
       - "192.168.0.29:53:53/udp"
       - "192.168.0.29:8081:80/tcp"
+
+    # --- Pi-hole settings ---
     environment:
       TZ: "America/Detroit"
       WEB_PORT: "80"
       FTLCONF_dns_listeningMode: "ALL"
       FTLCONF_dns_upstreams: "172.28.0.2#5053"   # by IP on purpose, see top
+
+    # --- Persistent data ---
     volumes:
       - ./config/pihole:/etc/pihole
       - ./config/dnsmasq.d:/etc/dnsmasq.d
+
+    # --- Hardening ---
     cap_add:
       - NET_ADMIN
     security_opt:
       - no-new-privileges:true
 
+# ---------------------------------------------------------------------
+# Network: dns_net
 # 172.28.x avoids Docker's default 172.17-172.20 pools. Change it if it
 # overlaps your LAN/VPN (and update the upstream IP above to match).
+# ---------------------------------------------------------------------
 networks:
   dns_net:
     driver: bridge

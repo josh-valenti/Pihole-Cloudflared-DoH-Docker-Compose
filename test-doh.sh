@@ -1,8 +1,15 @@
 #!/bin/bash
 # =====================================================================
-# test-doh.sh - Verify Pi-hole + Cloudflared DoH stack is working
+# test-doh.sh - Verify Pi-hole + dnscrypt-proxy DoH stack is working
 #
-# Changes from previous version:
+# Changes in this version:
+#   - cloudflared replaced by dnscrypt-proxy (cloudflared removed its
+#     proxy-dns mode in 2026.2.0). Same static IP and port.
+#   - Test 1 now checks the DoH proxy's Docker healthcheck, not just
+#     "running" (the healthcheck does a real DoH round trip)
+#   - Test 4 reads dnscrypt-proxy's startup log for live DoH servers
+#
+# Changes from the version before that:
 #   - Detects "docker compose" (v2) vs "docker-compose" (v1) automatically
 #   - Pi-hole IP detected from the RUNNING container first (docker port),
 #     with the compose file as a fallback -- the old grep -A1 parse was
@@ -21,8 +28,9 @@ set -euo pipefail
 # --------------------------------------------------------------------
 # Section: Configuration
 # --------------------------------------------------------------------
-CLOUDFLARED_IP="172.28.0.2"     # Must match docker-compose.yml static IP
-CLOUDFLARED_PORT="5053"
+DOH_PROXY_IP="172.28.0.2"       # Must match docker-compose.yml static IP
+DOH_PROXY_PORT="5053"           # Must match listen_addresses in dnscrypt-proxy.toml
+DOH_PROXY_CONTAINER="dnscrypt-proxy"
 failures=0
 
 # --------------------------------------------------------------------
@@ -74,7 +82,7 @@ echo
 # --------------------------------------------------------------------
 # Test 0: System clock / NTP sync
 # The Pi 4 has no RTC. Right after a reboot the clock can be wrong
-# until NTP syncs, which makes cloudflared's TLS (DoH) handshakes fail.
+# until NTP syncs, which makes dnscrypt-proxy's TLS (DoH) handshakes fail.
 # --------------------------------------------------------------------
 echo "=== Test 0: System Clock Sync ==="
 NTP_SYNCED=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo "unknown")
@@ -98,11 +106,13 @@ else
     fail "Pi-hole container is not healthy (state: $PIHOLE_HEALTH)"
 fi
 
-CLOUDFLARED_STATE=$(docker inspect -f '{{.State.Status}}' cloudflared-doh 2>/dev/null || echo "missing")
-if [ "$CLOUDFLARED_STATE" = "running" ]; then
-    pass "Cloudflared container is running"
+# The DoH proxy healthcheck resolves a name through dnscrypt-proxy, so
+# "healthy" means a DoH round trip to Cloudflare is working
+DOH_PROXY_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' "$DOH_PROXY_CONTAINER" 2>/dev/null || echo "missing")
+if [ "$DOH_PROXY_HEALTH" = "healthy" ]; then
+    pass "dnscrypt-proxy container is running and healthy"
 else
-    fail "Cloudflared container is not running (state: $CLOUDFLARED_STATE)"
+    fail "dnscrypt-proxy container is not healthy (state: $DOH_PROXY_HEALTH)"
 fi
 echo
 
@@ -132,40 +142,39 @@ fi
 echo
 
 # --------------------------------------------------------------------
-# Test 4: Cloudflared DoH configuration (from container logs)
+# Test 4: dnscrypt-proxy DoH configuration (from container logs)
+# At startup dnscrypt-proxy probes every configured DoH server and logs
+# "live servers: N". N > 0 means at least one Cloudflare endpoint works.
 # --------------------------------------------------------------------
-echo "=== Test 4: Cloudflared DoH Configuration ==="
-if [ "$CLOUDFLARED_STATE" != "running" ]; then
-    fail "Skipping - cloudflared container is not running"
+echo "=== Test 4: dnscrypt-proxy DoH Configuration ==="
+if [ "$DOH_PROXY_HEALTH" = "missing" ]; then
+    fail "Skipping - dnscrypt-proxy container does not exist"
 else
-    CLOUDFLARED_LOGS=$(docker logs cloudflared-doh 2>&1 || true)
-    if [ -z "$CLOUDFLARED_LOGS" ]; then
-        fail "No logs available from cloudflared container"
-    elif echo "$CLOUDFLARED_LOGS" | grep -q "Adding DNS upstream.*https.*dns-query"; then
-        pass "Cloudflared is configured for DNS-over-HTTPS"
-        # NOTE: grep -c prints the count itself; "|| true" only guards the
-        # nonzero exit code when count is 0 (old version double-printed "0")
-        UPSTREAM_COUNT=$(echo "$CLOUDFLARED_LOGS" | grep -c "Adding DNS upstream.*https.*dns-query" || true)
-        echo "   $UPSTREAM_COUNT DoH upstream servers configured"
-        if echo "$CLOUDFLARED_LOGS" | grep -q "Starting DNS over HTTPS proxy server"; then
-            echo "   DNS proxy server started successfully"
-        fi
+    DOH_PROXY_LOGS=$(docker logs "$DOH_PROXY_CONTAINER" 2>&1 || true)
+    # Most recent "live servers: N" line (the container may have restarted)
+    LIVE_SERVERS=$(echo "$DOH_PROXY_LOGS" | grep -oE "live servers: [0-9]+" | tail -1 | awk '{print $3}' || true)
+    if [ -z "$DOH_PROXY_LOGS" ]; then
+        fail "No logs available from dnscrypt-proxy container"
+    elif [ -n "${LIVE_SERVERS:-}" ] && [ "$LIVE_SERVERS" -gt 0 ]; then
+        pass "dnscrypt-proxy is forwarding over DNS-over-HTTPS"
+        echo "   $LIVE_SERVERS live DoH server(s)"
+        echo "$DOH_PROXY_LOGS" | grep -E "^\[.*\] \[NOTICE\] -  " | tail -"$LIVE_SERVERS" | sed 's/^.*NOTICE\] -/  /'
     else
-        fail "Cloudflared DoH configuration not detected"
-        echo "First 10 log lines:"
-        echo "$CLOUDFLARED_LOGS" | head -10
+        fail "dnscrypt-proxy has no live DoH servers yet"
+        echo "Last 10 log lines:"
+        echo "$DOH_PROXY_LOGS" | tail -10
     fi
 fi
 echo
 
 # --------------------------------------------------------------------
-# Test 5: Pi-hole -> Cloudflared communication (by static IP)
+# Test 5: Pi-hole -> dnscrypt-proxy communication (by static IP)
 # --------------------------------------------------------------------
-echo "=== Test 5: Pi-hole to Cloudflared Communication ==="
-if docker exec pihole dig @"$CLOUDFLARED_IP" -p "$CLOUDFLARED_PORT" google.com +short +time=3 +tries=1 > /dev/null 2>&1; then
-    pass "Pi-hole can reach Cloudflared at $CLOUDFLARED_IP:$CLOUDFLARED_PORT"
+echo "=== Test 5: Pi-hole to dnscrypt-proxy Communication ==="
+if docker exec pihole dig @"$DOH_PROXY_IP" -p "$DOH_PROXY_PORT" google.com +short +time=3 +tries=1 > /dev/null 2>&1; then
+    pass "Pi-hole can reach dnscrypt-proxy at $DOH_PROXY_IP:$DOH_PROXY_PORT"
 else
-    fail "Pi-hole cannot reach Cloudflared at $CLOUDFLARED_IP:$CLOUDFLARED_PORT"
+    fail "Pi-hole cannot reach dnscrypt-proxy at $DOH_PROXY_IP:$DOH_PROXY_PORT"
 fi
 echo
 
@@ -173,10 +182,10 @@ echo
 # Test 6: Pi-hole upstream configuration (expects static IP upstream)
 # --------------------------------------------------------------------
 echo "=== Test 6: Pi-hole Upstream Configuration ==="
-if docker exec pihole grep -q "${CLOUDFLARED_IP}#${CLOUDFLARED_PORT}" /etc/pihole/pihole.toml 2>/dev/null; then
-    pass "Pi-hole upstream is set to ${CLOUDFLARED_IP}#${CLOUDFLARED_PORT}"
+if docker exec pihole grep -q "${DOH_PROXY_IP}#${DOH_PROXY_PORT}" /etc/pihole/pihole.toml 2>/dev/null; then
+    pass "Pi-hole upstream is set to ${DOH_PROXY_IP}#${DOH_PROXY_PORT}"
 else
-    fail "Pi-hole upstream configuration does not match ${CLOUDFLARED_IP}#${CLOUDFLARED_PORT}"
+    fail "Pi-hole upstream configuration does not match ${DOH_PROXY_IP}#${DOH_PROXY_PORT}"
 fi
 echo
 
@@ -189,7 +198,7 @@ if [ "$EUID" -ne 0 ]; then
     echo "   Run 'sudo ./test-doh.sh' to verify DoH encryption on the wire"
 else
     echo "Capturing HTTPS traffic to Cloudflare for up to 10 seconds..."
-    # Cloudflared load-balances between 1.1.1.1 and 1.0.0.1 - match both
+    # dnscrypt-proxy load-balances between 1.1.1.1 and 1.0.0.1 - match both
     timeout 10s tcpdump -i any -n '(host 1.1.1.1 or host 1.0.0.1) and port 443' -c 5 > /tmp/doh_traffic.log 2>&1 &
     TCPDUMP_PID=$!
     sleep 2
@@ -239,7 +248,9 @@ echo
 echo "=== Test 9: Configuration Summary ==="
 echo "Pi-hole IP:     $PIHOLE_IP"
 echo "Web Interface:  http://$PIHOLE_IP:8081/admin"
-UPSTREAMS=$(docker exec pihole sh -c "grep -A5 'upstreams = \[' /etc/pihole/pihole.toml" 2>/dev/null | grep -v "upstreams = \[" | grep -v "^--" | tr -d ' "[],' | grep -v "^$" || true)
+# Print only the quoted values inside "upstreams = [ ... ]" (the old
+# grep -A5 version also printed the comment lines that follow it)
+UPSTREAMS=$(docker exec pihole sed -n '/^[[:space:]]*upstreams = \[/,/\]/p' /etc/pihole/pihole.toml 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | paste -sd' ' || true)
 echo "Upstreams:      ${UPSTREAMS:-unknown}"
 echo
 
@@ -255,6 +266,7 @@ else
     echo "Common fixes:"
     echo "- '$COMPOSE up -d' to ensure containers are running"
     echo "- '$COMPOSE logs' for error messages"
-    echo "- Confirm CLOUDFLARED_IP in this script matches docker-compose.yml"
+    echo "- Confirm DOH_PROXY_IP in this script matches docker-compose.yml"
+    echo "- '$COMPOSE logs dnscrypt-proxy' if DoH servers are not coming up"
 fi
 echo

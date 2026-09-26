@@ -1,0 +1,105 @@
+# =====================================================================
+# dnscrypt-proxy.toml - DNS-over-HTTPS forwarder for Pi-hole
+#
+# Replaces cloudflared's proxy-dns mode, which Cloudflare removed in
+# cloudflared 2026.2.0. Pi-hole sends plain DNS to this container on
+# 172.28.0.2:5053, and dnscrypt-proxy forwards it to Cloudflare over
+# HTTPS (DoH). Nothing leaves the host in plain text.
+#
+# Mounted read-only at /config/dnscrypt-proxy.toml (see docker-compose.yml).
+# Full option reference: config/example-dnscrypt-proxy.toml inside the image.
+# =====================================================================
+
+
+# --------------------------------------------------------------------
+# Section: Listener
+# Port 5053 matches the old cloudflared port, so Pi-hole's upstream
+# setting (172.28.0.2#5053) does not change. Only reachable on the
+# internal dns_net bridge; this port is never published to the LAN.
+# --------------------------------------------------------------------
+listen_addresses = ['0.0.0.0:5053']
+max_clients = 250
+
+
+# --------------------------------------------------------------------
+# Section: Upstream servers
+# Only the two Cloudflare DoH endpoints defined under [static] below
+# are used. No public resolver lists are downloaded, which keeps the
+# container read-only and the upstream set fixed and auditable.
+# --------------------------------------------------------------------
+server_names = ['cloudflare-1.1.1.1', 'cloudflare-1.0.0.1']
+
+ipv4_servers = true
+ipv6_servers = false
+dnscrypt_servers = false
+doh_servers = true
+odoh_servers = false
+
+# Pick the fastest of the two servers, with a little randomness so both
+# stay warm (same behaviour as cloudflared alternating 1.1.1.1/1.0.0.1)
+lb_strategy = 'p2'
+
+
+# --------------------------------------------------------------------
+# Section: Bootstrap and startup
+# The stamps below contain the server IPs, so bootstrap resolvers are
+# only a fallback. ignore_system_dns stops dnscrypt-proxy from ever
+# using the host/Docker resolver for anything.
+#
+# netprobe_timeout makes dnscrypt-proxy wait (up to 60s) for outbound
+# connectivity before starting. Helps on a Pi right after a reboot
+# while the network and NTP clock are still coming up.
+# --------------------------------------------------------------------
+bootstrap_resolvers = ['1.1.1.1:53', '1.0.0.1:53']
+ignore_system_dns = true
+netprobe_address = '1.1.1.1:443'
+netprobe_timeout = 60
+
+
+# --------------------------------------------------------------------
+# Section: Timeouts and connection reuse
+# --------------------------------------------------------------------
+timeout = 5000
+keepalive = 30
+http3 = false
+cert_refresh_delay = 240
+
+
+# --------------------------------------------------------------------
+# Section: Filtering
+# Blocking is Pi-hole's job, so everything here is left off. IPv6
+# (AAAA) answers are passed through untouched.
+# --------------------------------------------------------------------
+block_ipv6 = false
+block_unqualified = true
+block_undelegated = true
+
+
+# --------------------------------------------------------------------
+# Section: Cache
+# Small in-memory cache. Pi-hole also caches, so this only absorbs
+# bursts. Nothing is written to disk.
+# --------------------------------------------------------------------
+cache = true
+cache_size = 4096
+cache_min_ttl = 600
+cache_max_ttl = 86400
+cache_neg_min_ttl = 60
+cache_neg_max_ttl = 600
+
+
+# --------------------------------------------------------------------
+# Section: Static server definitions
+# DNS stamps encode protocol (DoH), IP, TLS hostname and path.
+#   cloudflare-1.0.0.1 is the official stamp from the dnscrypt
+#   public-resolvers list; cloudflare-1.1.1.1 is the same stamp with
+#   the IP swapped. Both validate TLS against dns.cloudflare.com.
+# Decode or build stamps at https://dnscrypt.info/stamps
+# --------------------------------------------------------------------
+[static]
+
+  [static.'cloudflare-1.1.1.1']
+  stamp = 'sdns://AgcAAAAAAAAABzEuMS4xLjEAEmRucy5jbG91ZGZsYXJlLmNvbQovZG5zLXF1ZXJ5'
+
+  [static.'cloudflare-1.0.0.1']
+  stamp = 'sdns://AgcAAAAAAAAABzEuMC4wLjEAEmRucy5jbG91ZGZsYXJlLmNvbQovZG5zLXF1ZXJ5'

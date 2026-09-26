@@ -1,10 +1,12 @@
-# Pi-hole + Cloudflared DNS-over-HTTPS
+# Pi-hole + dnscrypt-proxy DNS-over-HTTPS
 
-A simple Docker setup that blocks ads across your entire network while keeping your DNS queries private. Pi-hole does the ad blocking, and Cloudflared encrypts all your DNS requests so your ISP can't see what websites you're visiting.
+A simple Docker setup that blocks ads across your entire network while keeping your DNS queries private. Pi-hole does the ad blocking, and dnscrypt-proxy encrypts all your DNS requests (sent to Cloudflare over HTTPS) so your ISP can't see what websites you're visiting.
 
 ## What this does
 
-Your devices → Pi-hole (blocks ads) → Cloudflared (encrypts DNS) → Cloudflare
+Your devices → Pi-hole (blocks ads) → dnscrypt-proxy (encrypts DNS) → Cloudflare
+
+> **Why not cloudflared?** Earlier versions of this repo used `cloudflared proxy-dns`. Cloudflare removed that mode in cloudflared 2026.2.0, so `cloudflare/cloudflared:latest` no longer starts as a DNS proxy. dnscrypt-proxy is a maintained replacement that keeps the same internal IP, port and Cloudflare upstreams, so Pi-hole's settings don't change.
 
 Instead of your DNS queries going out in plain text where anyone can see them, they get encrypted and sent over HTTPS. Plus you get network-wide ad blocking without installing anything on individual devices.
 
@@ -69,7 +71,7 @@ docker ps
      - "YOUR_PI_IP:8081:80/tcp"
    ```
 
-   The compose file also creates an internal Docker network on `172.28.0.0/24` for Pi-hole and Cloudflared to talk to each other. If that range conflicts with your LAN or VPN, change the subnet under `networks:` at the bottom of `docker-compose.yml`, and update the upstream IP `172.28.0.2` in two places: `FTLCONF_dns_upstreams` in `docker-compose.yml` and `CLOUDFLARED_IP` in `test-doh.sh`.
+   The compose file also creates an internal Docker network on `172.28.0.0/24` for Pi-hole and dnscrypt-proxy to talk to each other. If that range conflicts with your LAN or VPN, change the subnet under `networks:` at the bottom of `docker-compose.yml`, and update the upstream IP `172.28.0.2` in three places: `ipv4_address` of the `dnscrypt-proxy` service and `FTLCONF_dns_upstreams` in `docker-compose.yml`, and `DOH_PROXY_IP` in `test-doh.sh`.
 
 3. **Create folders**
    ```bash
@@ -81,11 +83,43 @@ docker ps
    docker-compose up -d
    ```
 
+   Pi-hole waits until dnscrypt-proxy reports healthy (a real DoH lookup succeeded) before it starts.
+
 5. **Check it's working**
    ```bash
    docker-compose ps
-   # Both containers should show "Up" and pihole should show "healthy"
+   # Both containers should show "Up (healthy)"
    ```
+
+## Upgrading from the cloudflared version
+
+The old `cloudflared` container holds the `172.28.0.2` address, so remove it while bringing up the new stack:
+
+```bash
+git pull
+docker-compose up -d --remove-orphans
+```
+
+`--remove-orphans` deletes the old `cloudflared-doh` container (it's no longer in the compose file) so dnscrypt-proxy can take its IP. Your Pi-hole config in `./config` is untouched.
+
+## DoH proxy settings
+
+The DoH proxy config lives in `dnscrypt-proxy/dnscrypt-proxy.toml` and is mounted read-only into the container. It only talks to Cloudflare's DoH endpoints on 1.1.1.1 and 1.0.0.1; no resolver lists are downloaded. Each section of the file is commented. After editing it, restart the proxy:
+
+```bash
+docker-compose restart dnscrypt-proxy
+```
+
+## Updating images
+
+Both images are pinned by version tag and digest (`image:tag@sha256:...`), so a pull always gets the exact image that was tested. To upgrade, pull the new tag, copy the digest it prints into `docker-compose.yml`, then recreate:
+
+```bash
+docker pull pihole/pihole:NEW_TAG          # prints "Digest: sha256:..."
+docker pull klutchell/dnscrypt-proxy:NEW_TAG
+# edit docker-compose.yml with the new tag@digest
+docker-compose up -d
+```
 
 ## Using it
 
@@ -121,7 +155,7 @@ nslookup facebook.com YOUR_PI_IP
 
 You should see encrypted traffic on port 443. If you see traffic on port 53 instead, something's wrong.
 
-Cloudflared alternates between 1.1.1.1 and 1.0.0.1, so traffic to either address is normal.
+dnscrypt-proxy load-balances between 1.1.1.1 and 1.0.0.1, so traffic to either address is normal.
 
 ## Router setup
 
@@ -168,6 +202,11 @@ Running with sudo allows the script to monitor network traffic and confirm that 
 **DNS not working**
 - Verify containers are running: `docker-compose ps`
 - Check logs: `docker-compose logs pihole`
+
+**Pi-hole never starts / dnscrypt-proxy stays "unhealthy"**
+- Check the proxy logs: `docker-compose logs dnscrypt-proxy`
+- Look for a `live servers: 2` line. If you see TLS or certificate errors right after a reboot, the Pi's clock may not be synced yet (`timedatectl`)
+- Make sure outbound HTTPS (TCP 443) to 1.1.1.1 and 1.0.0.1 is allowed
 
 **Ads still showing**
 - Wait a few minutes for blocklists to load
